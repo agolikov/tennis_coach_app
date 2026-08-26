@@ -8,6 +8,8 @@ export default defineConfig(({ command }) => ({
     host: '0.0.0.0',
     port: 3000,
     strictPort: true,
+    // OrbStack serves containers at <service>.<project>.orb.local
+    allowedHosts: ['.orb.local'],
     proxy: {
       '/v0': 'http://backend:8000',
     },

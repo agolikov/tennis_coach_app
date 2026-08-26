@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Storage (auto-detected: local → local, production → supabase)
     UPLOAD_DIR: str = "../data/videos/raw"
     PROCESSED_DIR: str = "../data/videos/processed"
-    MAX_FILE_SIZE: int = 104857600  # 100MB
+    MAX_FILE_SIZE: int = 419430400  # 400MB
     SUPPORTED_FORMATS: list[str] = [".mp4", ".mov", ".avi", ".mkv", ".wmv"]
 
     # Redis (optional - defaults to localhost)
@@ -176,7 +176,7 @@ class Settings(BaseSettings):
         """Max file size - smaller in production."""
         return (
             52428800 if self.PROFILE == "production" else self.MAX_FILE_SIZE
-        )  # 50MB prod, 100MB local
+        )  # 50MB prod, 400MB local
 
     @property
     def effective_max_video_duration(self) -> int:

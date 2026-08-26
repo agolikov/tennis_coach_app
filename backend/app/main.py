@@ -224,9 +224,15 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # pyright: ignore[reportArgumentType]
 
 # Add CORS middleware
+# In local dev the app is also reachable on OrbStack container domains
+# (<service>.<project>.orb.local, over http and https), which are not fixed
+# enough to list individually. Never enabled outside PROFILE=local.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origin_regex=(
+        r"https?://[\w.-]+\.orb\.local(:\d+)?" if settings.PROFILE == "local" else None
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

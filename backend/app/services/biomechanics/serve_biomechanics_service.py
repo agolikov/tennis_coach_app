@@ -87,6 +87,15 @@ class ServeBiomechanicsService:
         if not serve_window:
             raise ValueError(f"Serve window {serve_window_id} not found")
 
+        # ServeWindow.player_id is nullable (e.g. rejected or unassigned windows)
+        # but a report requires one. Fail cleanly instead of hitting a
+        # NotNullViolation when the row is inserted below.
+        if serve_window.player_id is None:
+            raise ValueError(
+                f"Serve window {serve_window_id} has no player assigned. "
+                "Assign a player before computing biomechanics."
+            )
+
         video = db.query(Video).filter(Video.id == serve_window.video_id).first()
         if not video:
             raise ValueError(f"Video {serve_window.video_id} not found")
