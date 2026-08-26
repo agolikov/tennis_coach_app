@@ -66,7 +66,7 @@ function DemoPage() {
     );
   }
 
-  const videoUrl = `${import.meta.env.VITE_API_URL || 'http://localhost:8000/v0'}/videos/${demoVideo.id}/stream`;
+  const videoUrl = `${import.meta.env.VITE_API_URL || '/v0'}/videos/${demoVideo.id}/stream`;
 
   return (
     <Suspense

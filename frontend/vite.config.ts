@@ -11,7 +11,11 @@ export default defineConfig(({ command }) => ({
     // OrbStack serves containers at <service>.<project>.orb.local
     allowedHosts: ['.orb.local'],
     proxy: {
-      '/v0': 'http://backend:8000',
+      // The frontend calls /v0 on its own origin and this forwards it to the
+      // backend, which keeps API calls same-origin on whatever host the app is
+      // opened from. 'backend' is the compose service name and only resolves
+      // inside Docker; set VITE_API_PROXY_TARGET when running vite on the host.
+      '/v0': process.env.VITE_API_PROXY_TARGET || 'http://backend:8000',
     },
   },
   test: {

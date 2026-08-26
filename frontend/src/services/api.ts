@@ -11,7 +11,7 @@ import {
 import { getAuthHeaders } from '../utils/authInterceptor';
 
 export const API_BASE_URL =
-  import.meta.env.VITE_API_URL || 'http://localhost:8000/v0';
+  import.meta.env.VITE_API_URL || '/v0';
 const DEFAULT_TIMEOUT_MS = 30000;
 
 type ApiRequestConfig = {
