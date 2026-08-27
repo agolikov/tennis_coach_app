@@ -1,0 +1,92 @@
+services:
+  redis:
+    image: redis:7.4.2-alpine
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      target: runtime
+    restart: unless-stopped
+    environment:
+      PROFILE: local
+      DATABASE_URL: ${DATABASE_URL:-postgresql://placeholder:placeholder@127.0.0.1:9/placeholder}
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_TYPE: worker
+      LOG_LEVEL: INFO
+    volumes:
+      - app_data:/app/data
+      - ml_models:/app/backend/ml_models
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "from redis import Redis; from rq import Worker; import os;
+          raise SystemExit(0 if Worker.all(connection=Redis.from_url(os.environ['REDIS_URL'])) else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      PROFILE: local
+      DATABASE_URL: ${DATABASE_URL:-postgresql://placeholder:placeholder@127.0.0.1:9/placeholder}
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_TYPE: api-only
+      LOG_LEVEL: INFO
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+volumes:
+  app_data:
+  ml_models:
+  redis_data:

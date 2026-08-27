@@ -186,8 +186,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Skipped starting worker on API service "
                 "(existing worker detected, REDIS_URL not set, or check failed)"
             )
+    elif service_type == "api-only":
+        logger.info("Running as API service with a dedicated worker")
     elif service_type == "worker":
         logger.info("Running as worker service - skipping API worker startup")
+    else:
+        logger.warning(
+            "Unknown SERVICE_TYPE=%s; embedded worker startup is disabled",
+            service_type,
+        )
 
     yield
 

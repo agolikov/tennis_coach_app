@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # Redis (optional - defaults to localhost)
     REDIS_URL: Optional[str] = None
-    SERVICE_TYPE: Optional[str] = None  # 'api' or 'worker'
+    SERVICE_TYPE: Optional[str] = None  # 'api', 'api-only', or 'worker'
 
     # Background job behavior
     AUTO_ENQUEUE_ON_UPLOAD: bool = False

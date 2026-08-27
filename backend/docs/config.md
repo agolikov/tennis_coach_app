@@ -32,6 +32,7 @@ SUPABASE_SECRET_KEY=...
 SUPABASE_STORAGE_BUCKET=...
 
 REDIS_URL=rediss://...  # optional — defaults to redis://localhost:6379/0; use Upstash in real prod
+SERVICE_TYPE=api-only   # API container when a dedicated worker is deployed
 ADMIN_USER_IDS=uuid1,uuid2  # optional — required for admin UI and demo video management
 SUPABASE_DEMO_BUCKET=demo-videos  # optional — only needed if using public demo videos
 ```
