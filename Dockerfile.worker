@@ -18,8 +18,12 @@ WORKDIR /app/backend
 # Install opencv-python-headless (no GUI dependencies needed - encoding removed)
 RUN pip install --no-cache-dir opencv-python-headless
 
-# Install worker extras (MediaPipe + YOLO for pose and ball detection)
-RUN pip install --no-cache-dir -e ".[worker]"
+# Install CPU-only PyTorch first so pip does not resolve the CUDA runtime on
+# CPU-only deployment hosts, then install the remaining worker dependencies.
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.10.0 torchvision==0.25.0 && \
+    pip install --no-cache-dir -e ".[worker]"
 
 # Development stage - for local development with docker-compose
 FROM python:3.11-slim AS development

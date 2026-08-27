@@ -1,4 +1,17 @@
 services:
+  data-init:
+    image: alpine:3.21
+    command:
+      - chown
+      - -R
+      - 1000:1000
+      - /app/data
+      - /app/backend/ml_models
+    restart: "no"
+    volumes:
+      - app_data:/app/data
+      - ml_models:/app/backend/ml_models
+
   redis:
     image: redis:7.4.2-alpine
     command: redis-server --appendonly yes
@@ -27,6 +40,8 @@ services:
       - app_data:/app/data
       - ml_models:/app/backend/ml_models
     depends_on:
+      data-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
