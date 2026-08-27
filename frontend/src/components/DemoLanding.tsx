@@ -11,13 +11,13 @@ import {
 import React from 'react';
 import './DemoLanding.css';
 
-import { User } from '@supabase/supabase-js';
+import { AuthUser } from '../types/auth';
 
 interface DemoLandingProps {
   onTryDemo: () => void;
   onUploadVideo: () => void;
   onWatchTutorial: () => void;
-  user: User | null;
+  user: AuthUser | null;
 }
 
 const DemoLanding: React.FC<DemoLandingProps> = ({

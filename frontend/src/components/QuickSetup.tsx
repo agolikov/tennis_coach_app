@@ -74,7 +74,7 @@ export function QuickSetup({ onComplete }: QuickSetupProps) {
         parsedHeight = numericHeight;
       }
 
-      // Update Supabase user metadata with display_name
+      // Keep the in-session display name aligned with the profile
       const { error: metadataError } = await updateUserMetadata({
         display_name: trimmedName,
       });

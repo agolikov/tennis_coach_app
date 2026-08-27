@@ -21,7 +21,6 @@ sys.path.insert(0, str(backend_dir))
 
 from rq import Retry  # noqa: E402
 
-from app.core.config import settings  # noqa: E402
 from app.core.database import SessionLocal  # noqa: E402
 from app.core.redis_config import analysis_queue  # noqa: E402
 from app.models.video import Video  # noqa: E402
@@ -38,20 +37,8 @@ def get_demo_video_path(video: Video) -> str:
     Returns:
         Storage path string that can be used for analysis
     """
-    # For local storage, return the file_path as-is
-    if settings.STORAGE_TYPE == "local":
-        return video.file_path
-
-    # For Supabase, if it's an active demo and in demo bucket, use the demo path
-    if (
-        video.is_active_demo
-        and settings.SUPABASE_DEMO_BUCKET
-        and video.file_path.startswith("demo/")
-    ):
-        # The file_path already points to the demo bucket
-        return video.file_path
-
-    # For regular Supabase videos, return file_path as-is
+    # file_path is the storage key (or local path) for every backend, and demo
+    # videos are just the "demo/" prefix of the same bucket.
     return video.file_path
 
 

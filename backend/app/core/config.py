@@ -21,22 +21,30 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     DEBUG: bool = False
 
-    # Database (auto-detected from PROFILE)
-    DATABASE_URL: Optional[str] = None  # Override default PostgreSQL URL if needed
-    SUPABASE_DB_URL: Optional[str] = None  # Required if PROFILE=production
+    # Database — PostgreSQL. Set DATABASE_URL to point at the managed instance;
+    # unset falls back to the local docker-compose/localhost default.
+    DATABASE_URL: Optional[str] = None
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_TIMEOUT_SECONDS: int = 30
     DB_POOL_RECYCLE_SECONDS: int = 1800
     DB_POOL_PRE_PING: bool = True
 
-    # Supabase (only needed if PROFILE=production)
-    SUPABASE_URL: Optional[str] = None
-    SUPABASE_SECRET_KEY: Optional[str] = None
-    SUPABASE_STORAGE_BUCKET: Optional[str] = None
-    SUPABASE_DEMO_BUCKET: Optional[str] = None
+    # S3-compatible object storage (SeaweedFS, MinIO, AWS S3).
+    # When all four required values are set, this takes precedence over the
+    # PROFILE-derived backend and video data lives in the bucket instead of on
+    # a mounted volume. Leave unset to keep using local disk.
+    S3_ENDPOINT_URL: Optional[str] = None
+    S3_BUCKET: Optional[str] = None
+    S3_ACCESS_KEY_ID: Optional[str] = None
+    S3_SECRET_ACCESS_KEY: Optional[str] = None
+    S3_REGION: str = "us-east-1"
+    # SeaweedFS and MinIO need path-style addressing; AWS accepts "virtual".
+    S3_ADDRESSING_STYLE: str = "path"
 
-    # Storage (auto-detected: local → local, production → supabase)
+    # Storage paths
+    # UPLOAD_DIR/PROCESSED_DIR stay in use as scratch space even on S3:
+    # ffmpeg and OpenCV need a real file on disk to transcode and seek.
     UPLOAD_DIR: str = "../data/videos/raw"
     PROCESSED_DIR: str = "../data/videos/processed"
     MAX_FILE_SIZE: int = 419430400  # 400MB
@@ -115,7 +123,7 @@ class Settings(BaseSettings):
         "https://aseda-sam.github.io",
     ]
 
-    # Admin access (comma-separated Supabase auth user UUIDs)
+    # Admin access (comma-separated auth user UUIDs)
     # In PROFILE=local, the auth dependency returns the mock user id below, so local dev
     # can access admin-only endpoints by default.
     ADMIN_USER_IDS: str = "00000000-0000-0000-0000-000000000000"
@@ -136,30 +144,34 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Get database URL - auto-detected from PROFILE."""
-        if self.PROFILE == "local":
-            # Use DATABASE_URL if provided, otherwise auto-detect Docker vs local
-            if self.DATABASE_URL:
-                return self.DATABASE_URL
+        """PostgreSQL URL - explicit DATABASE_URL, else the compose/local default."""
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
 
-            # Detect if running in Docker (check for /.dockerenv)
-            # In Docker, use service name 'postgres'; locally use 'localhost'
-            postgres_host = "postgres" if os.path.exists("/.dockerenv") else "localhost"
-            return f"postgresql://tennis:tennis_dev@{postgres_host}:5432/tennis_coach"
+        # Detect if running in Docker (check for /.dockerenv)
+        # In Docker, use service name 'postgres'; locally use 'localhost'
+        postgres_host = "postgres" if os.path.exists("/.dockerenv") else "localhost"
+        return f"postgresql://tennis:tennis_dev@{postgres_host}:5432/tennis_coach"
 
-        if not self.SUPABASE_DB_URL:
-            raise ValueError("SUPABASE_DB_URL required when PROFILE=production")
-        return self.SUPABASE_DB_URL
+    @property
+    def s3_configured(self) -> bool:
+        """True when every value needed to talk to the object store is present."""
+        return bool(
+            self.S3_ENDPOINT_URL
+            and self.S3_BUCKET
+            and self.S3_ACCESS_KEY_ID
+            and self.S3_SECRET_ACCESS_KEY
+        )
 
     @property
     def storage_type(self) -> str:
-        """Get storage type - auto-detected from PROFILE."""
-        return "local" if self.PROFILE == "local" else "supabase"
+        """Storage backend: the object store when configured, else local disk."""
+        return "s3" if self.s3_configured else "local"
 
     @property
     def auth_required(self) -> bool:
-        """Auth required? Only in production."""
-        return self.PROFILE == "production"
+        """No external auth provider is configured; the app is unauthenticated."""
+        return False
 
     @property
     def redis_url(self) -> str:
@@ -194,19 +206,22 @@ class Settings(BaseSettings):
 # Create settings
 settings = Settings()
 
-# Validate production config
-if settings.PROFILE == "production":
-    required = {
-        "SUPABASE_DB_URL": settings.SUPABASE_DB_URL,
-        "SUPABASE_URL": settings.SUPABASE_URL,
-        "SUPABASE_SECRET_KEY": settings.SUPABASE_SECRET_KEY,
-        "SUPABASE_STORAGE_BUCKET": settings.SUPABASE_STORAGE_BUCKET,
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        raise ValueError(
-            f"Missing required vars for PROFILE=production: {', '.join(missing)}"
-        )
+# Partial S3 configuration is a deployment mistake worth failing loudly on:
+# silently falling back to local disk would write uploads onto ephemeral
+# container storage and lose them on the next deploy.
+_s3_vars = {
+    "S3_ENDPOINT_URL": settings.S3_ENDPOINT_URL,
+    "S3_BUCKET": settings.S3_BUCKET,
+    "S3_ACCESS_KEY_ID": settings.S3_ACCESS_KEY_ID,
+    "S3_SECRET_ACCESS_KEY": settings.S3_SECRET_ACCESS_KEY,
+}
+_s3_set = [k for k, v in _s3_vars.items() if v]
+if _s3_set and len(_s3_set) != len(_s3_vars):
+    _s3_missing = [k for k, v in _s3_vars.items() if not v]
+    raise ValueError(
+        "Incomplete S3 configuration: set all of "
+        f"{', '.join(_s3_vars)} or none. Missing: {', '.join(_s3_missing)}"
+    )
 
 # Setup logging
 # Structured fields (request_id, job_id, video_id) are added
@@ -215,6 +230,18 @@ logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+# The container images no longer mount a persistent volume for video data, so
+# local storage inside a container means uploads live on the container's
+# writable layer and vanish on the next deploy. Warn loudly rather than lose
+# someone's videos quietly.
+if settings.storage_type == "local" and os.path.exists("/.dockerenv"):
+    logger.warning(
+        "Running in a container with local storage and no S3 bucket configured. "
+        "Uploaded videos will be written to ephemeral container storage and "
+        "LOST on the next deploy or restart. Set S3_ENDPOINT_URL, S3_BUCKET, "
+        "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY to persist them."
+    )
 
 # Create local storage directories on startup
 for d in [settings.UPLOAD_DIR, settings.PROCESSED_DIR]:

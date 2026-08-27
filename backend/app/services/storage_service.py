@@ -1,86 +1,95 @@
-"""Storage service for handling file uploads and downloads across different storage backends."""
+"""Storage service for handling file uploads and downloads across storage backends.
 
-# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportReturnType=false
-# Supabase SDK type stubs are incomplete — bucket names are Optional[str] from settings,
-# and the storage client is lazily initialized. Suppressing known false positives.
+Two backends are supported:
+
+* ``local`` — files live on the container filesystem under ``UPLOAD_DIR``.
+  Used for development and when no object store is configured.
+* ``s3``    — files live in an S3-compatible bucket (SeaweedFS here). Selected
+  automatically as soon as the ``S3_*`` settings are complete.
+
+Callers should not branch on the backend name directly; use :attr:`is_remote`
+when they need to know whether ``get_local_file_path`` handed back a temporary
+file that they are responsible for deleting.
+"""
 
 from __future__ import annotations
 
 import logging
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, BinaryIO, Optional
 
 from app.core.config import settings
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from botocore.client import BaseClient
 
 logger = logging.getLogger(__name__)
 
+# Objects are streamed to and from the bucket in chunks of this size rather
+# than being buffered whole; videos here run to hundreds of megabytes.
+STREAM_CHUNK_SIZE = 1024 * 1024
+
 
 class StorageService:
-    """Unified storage service supporting local and cloud storage backends."""
+    """Unified storage service supporting local disk and S3-compatible storage."""
 
     def __init__(self) -> None:
         """Initialize storage service based on configuration."""
         self.storage_type = settings.STORAGE_TYPE
-        self._supabase_client = None
+        self._s3_client: Optional[BaseClient] = None
 
-        if self.storage_type == "supabase":
-            self._init_supabase()
+        if self.storage_type == "s3":
+            self._init_s3()
 
-    def _init_supabase(self) -> None:
-        """Initialize cloud storage client for remote file storage."""
+    # Backend capability
+
+    @property
+    def is_remote(self) -> bool:
+        """True when files live off-box, so local paths are temporary copies."""
+        return self.storage_type != "local"
+
+    def _init_s3(self) -> None:
+        """Initialize the S3 client used for remote object storage."""
         try:
-            from supabase import create_client
-
-            if not settings.SUPABASE_URL or not settings.SUPABASE_SECRET_KEY:
-                logger.warning(
-                    "Cloud storage configured but SUPABASE_URL or SUPABASE_SECRET_KEY not set."
-                )
-                return
-
-            # Ensure URL has trailing slash (required by cloud storage client)
-            supabase_url = settings.SUPABASE_URL
-            if not supabase_url.endswith("/"):
-                supabase_url = supabase_url + "/"
-                logger.debug("Added trailing slash to storage URL: %s", supabase_url)
-
-            self._supabase_client: Client = create_client(
-                supabase_url, settings.SUPABASE_SECRET_KEY
-            )
-            logger.info("Cloud storage client initialized")
-        except ImportError:
+            import boto3
+            from botocore.config import Config
+        except ImportError:  # pragma: no cover - dependency is declared
             raise ImportError(
-                "supabase package is required for cloud storage. "
-                "Install it with: pip install supabase"
+                "boto3 is required for S3 storage. Install it with: pip install boto3"
             ) from None
+
+        try:
+            self._s3_client = boto3.client(
+                "s3",
+                endpoint_url=settings.S3_ENDPOINT_URL,
+                aws_access_key_id=settings.S3_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
+                region_name=settings.S3_REGION,
+                config=Config(
+                    # SeaweedFS and MinIO require SigV4 with path-style URLs;
+                    # virtual-host style would resolve bucket.host and fail.
+                    signature_version="s3v4",
+                    s3={"addressing_style": settings.S3_ADDRESSING_STYLE},
+                    retries={"max_attempts": 3, "mode": "standard"},
+                ),
+            )
+            logger.info(
+                "S3 storage client initialized (endpoint=%s, bucket=%s)",
+                settings.S3_ENDPOINT_URL,
+                settings.S3_BUCKET,
+            )
         except Exception as e:
-            logger.error("Failed to initialize cloud storage client: %s", e)
-            raise RuntimeError(f"Failed to initialize cloud storage client: {e}") from e
+            logger.error("Failed to initialize S3 client: %s", e)
+            raise RuntimeError(f"Failed to initialize S3 client: {e}") from e
 
-    def _get_supabase_client(self) -> Client:
-        """Return the validated Supabase client, or raise if not initialized."""
-        if not self._supabase_client:
+    def _get_s3_client(self) -> BaseClient:
+        """Return the initialized S3 client, or raise if it is unavailable."""
+        if self._s3_client is None:
             raise ValueError(
-                "Cloud storage client not initialized. Check SUPABASE_URL and SUPABASE_SECRET_KEY."
+                "S3 client not initialized. Check the S3_* settings."
             )
-        return self._supabase_client
-
-    def _validate_supabase_config(self) -> None:
-        """Validate cloud storage configuration and client."""
-        self._get_supabase_client()
-        if not settings.SUPABASE_STORAGE_BUCKET:
-            raise ValueError("SUPABASE_STORAGE_BUCKET must be set")
-
-    def _validate_demo_bucket_config(self) -> None:
-        """Validate demo bucket configuration."""
-        self._validate_supabase_config()
-        if not settings.SUPABASE_DEMO_BUCKET:
-            raise ValueError(
-                "SUPABASE_DEMO_BUCKET must be set for demo bucket operations"
-            )
+        return self._s3_client
 
     def _validate_file_path(self, file_path: str) -> None:
         """Validate file path to prevent directory traversal attacks.
@@ -104,13 +113,13 @@ class StorageService:
                     raise ValueError("Invalid file path: path traversal detected")
                 # Leading "../data/" is the expected local storage pattern
             else:
-                # Cloud storage or non-data ".." path - reject
+                # Object storage or non-data ".." path - reject
                 raise ValueError("Invalid file path: path traversal detected")
 
-        # For cloud storage, reject absolute paths (local storage allows them)
+        # For object storage, reject absolute paths (local storage allows them)
         if self.storage_type != "local" and file_path.startswith("/"):
             raise ValueError(
-                "Invalid file path: absolute paths not allowed for cloud storage"
+                "Invalid file path: absolute paths not allowed for object storage"
             )
 
     def _resolve_local_path(self, file_path: str) -> Path:
@@ -168,11 +177,11 @@ class StorageService:
             content_type: MIME type of the file
 
         Returns:
-            Storage path/URL of the uploaded file
+            Storage path of the uploaded file (may differ if the name was taken)
         """
         self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            return self._upload_to_supabase(file_content, file_path, content_type)
+        if self.storage_type == "s3":
+            return self._upload_to_s3(file_content, file_path, content_type)
         return self._upload_to_local(file_content, file_path)
 
     def download_file(self, file_path: str) -> bytes:
@@ -186,19 +195,13 @@ class StorageService:
             File content as bytes
         """
         self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            # Check if this is a demo bucket path
-            if file_path.startswith("demo/") and settings.SUPABASE_DEMO_BUCKET:
-                return self._download_from_demo_bucket(file_path)
-            return self._download_from_supabase(file_path)
+        if self.storage_type == "s3":
+            return self._download_from_s3(file_path)
         return self._download_from_local(file_path)
 
     def download_private_file(self, file_path: str) -> bytes:
-        """Download a file from the primary storage bucket (Supabase) or local storage."""
-        self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            return self._download_from_supabase(file_path)
-        return self._download_from_local(file_path)
+        """Download a file from the primary bucket or local storage."""
+        return self.download_file(file_path)
 
     def delete_file(self, file_path: str) -> None:
         """
@@ -208,8 +211,8 @@ class StorageService:
             file_path: Path to the file in storage
         """
         self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            self._delete_from_supabase(file_path)
+        if self.storage_type == "s3":
+            self._delete_from_s3(file_path)
         else:
             self._delete_from_local(file_path)
 
@@ -220,10 +223,7 @@ class StorageService:
         content_type: Optional[str] = None,
     ) -> str:
         """
-        Atomically replace a file in storage with new content.
-
-        For cloud storage: Uploads new file, then deletes old file.
-        For local storage: Writes new file to same path (overwrites).
+        Replace a file in storage with new content, in place.
 
         Args:
             old_file_path: Path to the existing file to replace
@@ -231,65 +231,48 @@ class StorageService:
             content_type: MIME type of the new file
 
         Returns:
-            Storage path of the replaced file (same as old_file_path for local, may differ for cloud)
+            Storage path of the replaced file (unchanged)
         """
         self._validate_file_path(old_file_path)
-        if self.storage_type == "supabase":
-            # Upload new file first (may get counter appended if name conflicts)
-            new_path = self.upload_file(new_file_content, old_file_path, content_type)
-            # Delete old file only if path changed (avoid deleting the new file)
-            if new_path != old_file_path:
-                try:
-                    self.delete_file(old_file_path)
-                except (OSError, RuntimeError, ValueError) as e:
-                    # Best-effort cleanup; replace already succeeded
-                    logger.warning(
-                        "Failed to delete old file %s after replace: %s",
-                        old_file_path,
-                        e,
-                    )
-            return new_path
-        else:
-            # For local storage, overwrite the file directly
-            return self._upload_to_local(new_file_content, old_file_path)
+        if self.storage_type == "s3":
+            # Overwriting the same key is atomic from a reader's point of view,
+            # so unlike the old two-step upload/delete there is no window where
+            # both the stale and the fresh object exist.
+            self._put_s3_object(old_file_path, new_file_content, content_type)
+            return old_file_path
+        return self._upload_to_local(new_file_content, old_file_path)
 
     def get_file_url(self, file_path: str) -> str:
         """
-        Get a URL to access the file (for cloud storage) or path (for local).
+        Get a URL to access the file (object storage) or the path (local).
 
         Args:
             file_path: Path to the file in storage
 
         Returns:
-            URL to access the file (cloud storage) or file path (local)
+            Presigned URL for object storage, or the file path for local storage
         """
-        self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            if file_path.startswith("demo/") and settings.SUPABASE_DEMO_BUCKET:
-                return self.get_demo_public_url(file_path)
-            return self._get_supabase_url(file_path)
-        return file_path  # Local storage - API route handles serving
+        return self.create_signed_url(file_path)
 
     def create_signed_url(self, file_path: str, expires_in: int = 3600) -> str:
         """
         Create a signed URL for secure, time-limited access to a file.
 
+        Note that the app streams video through its own ``/videos/{id}/stream``
+        endpoint rather than redirecting browsers here: the object store is on a
+        different origin, which would taint the canvas the thumbnail strip draws
+        into. This stays available for callers that genuinely want a direct URL.
+
         Args:
             file_path: Path to the file in storage
-            expires_in: Number of seconds the URL should remain valid (default: 1 hour)
+            expires_in: Seconds the URL should remain valid (default: 1 hour)
 
         Returns:
-            Signed URL string for cloud storage, or file path for local storage
-
-        Raises:
-            ValueError: If storage configuration is invalid
-            RuntimeError: If signed URL creation fails
+            Signed URL string for object storage, or file path for local storage
         """
         self._validate_file_path(file_path)
-        if self.storage_type == "supabase":
-            if file_path.startswith("demo/") and settings.SUPABASE_DEMO_BUCKET:
-                return self.get_demo_public_url(file_path)
-            return self._create_supabase_signed_url(file_path, expires_in)
+        if self.storage_type == "s3":
+            return self._create_s3_signed_url(file_path, expires_in)
         return file_path  # Local storage - API route handles serving
 
     def get_local_file_path(
@@ -298,11 +281,11 @@ class StorageService:
         """
         Get a local file path for processing.
 
-        For cloud storage: Downloads file to a temporary location and returns the path.
-        For local storage: Returns the actual file path.
+        For object storage: downloads the file to a temporary location and
+        returns that path. For local storage: returns the actual file path.
 
-        IMPORTANT: When using cloud storage, the caller MUST clean up the temp file
-        after processing. Use a try/finally block or context manager.
+        IMPORTANT: when :attr:`is_remote` is true the caller MUST delete the
+        returned file after processing. Use a try/finally block.
 
         Args:
             file_path: Path to the file in storage
@@ -315,344 +298,189 @@ class StorageService:
             temp_path = None
             try:
                 temp_path = storage_service.get_local_file_path("raw/video.mp4")
-                # Process video using temp_path
                 process_video(temp_path)
             finally:
-                if temp_path and temp_path.exists():
-                    temp_path.unlink()  # Clean up
+                if temp_path and storage_service.is_remote:
+                    temp_path.unlink(missing_ok=True)
         """
         self._validate_file_path(file_path)
 
-        if self.storage_type == "supabase":
-            # Download from cloud storage to temp file
-            logger.info(
-                f"Downloading file from cloud storage for processing: {file_path}"
-            )
-            file_content = self.download_file(file_path)
+        if self.storage_type == "s3":
+            logger.info("Downloading %s from object storage for processing", file_path)
 
             temp_dir_path = Path(temp_dir) if temp_dir else Path(settings.PROCESSED_DIR)
             temp_dir_path.mkdir(parents=True, exist_ok=True)
 
-            # Create temp file
+            # Stream to disk rather than buffering the whole object in memory:
+            # these are full-length videos and the worker container is small.
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=Path(file_path).suffix, dir=str(temp_dir_path)
             ) as temp_file:
-                temp_file.write(file_content)
                 temp_path = Path(temp_file.name)
+                self._get_s3_client().download_fileobj(
+                    settings.S3_BUCKET, file_path, temp_file
+                )
 
             logger.debug("Downloaded to temp file: %s", temp_path)
             return temp_path
-        else:
-            # For local storage, return the actual path
-            return self._resolve_local_path(file_path)
 
-    # Cloud storage methods
+        return self._resolve_local_path(file_path)
 
-    def _upload_to_supabase(
+    # Object storage methods
+
+    def _put_s3_object(
+        self, key: str, file_content: bytes, content_type: Optional[str] = None
+    ) -> None:
+        """Write an object to the bucket, overwriting any existing key."""
+        extra: dict[str, Any] = {}
+        if content_type:
+            extra["ContentType"] = content_type
+
+        try:
+            self._get_s3_client().put_object(
+                Bucket=settings.S3_BUCKET, Key=key, Body=file_content, **extra
+            )
+        except Exception as e:
+            logger.error("Failed to upload %s to object storage: %s", key, e)
+            raise RuntimeError(f"Failed to upload {key}: {e}") from e
+
+    def object_exists(self, file_path: str) -> bool:
+        """Return True when the key is present in the bucket."""
+        if self.storage_type != "s3":
+            return self._resolve_local_path(file_path).exists()
+        try:
+            self._get_s3_client().head_object(
+                Bucket=settings.S3_BUCKET, Key=file_path
+            )
+            return True
+        except Exception:  # noqa: BLE001 - any failure means "not usable"
+            return False
+
+    def _upload_to_s3(
         self, file_content: bytes, file_path: str, content_type: Optional[str] = None
     ) -> str:
         """
-        Upload file to cloud storage with automatic unique filename generation.
+        Upload a file to the bucket, generating a unique key if one is taken.
 
-        If a file with the same name already exists, automatically appends a counter
-        (e.g., test.mp4 -> test_1.mp4 -> test_2.mp4) to ensure uniqueness, consistent
-        with local storage behavior.
-
-        Args:
-            file_content: File content as bytes
-            file_path: Path where file should be stored
-            content_type: MIME type of the file
-
-        Returns:
-            Storage path of the uploaded file (may have counter appended)
-
-        Raises:
-            RuntimeError: If unable to generate unique filename after max attempts
-            ValueError: If storage configuration is invalid
+        S3 PUT overwrites silently, so an existing key is probed for first to
+        preserve the same no-clobber behaviour local storage has.
         """
-        self._validate_supabase_config()
-
-        file_options: dict[str, str] = {}
-        if content_type:
-            file_options["content-type"] = content_type
-
-        # Extract directory and filename components for counter-based naming
         path_obj = Path(file_path)
         directory = str(path_obj.parent) if path_obj.parent != Path(".") else ""
         base_name = path_obj.stem
         extension = path_obj.suffix
 
-        # Try to upload, and if duplicate error occurs, append counter and retry
         current_path = file_path
         counter = 0
         max_attempts = 1000
 
         while counter < max_attempts:
-            try:
-                # Attempt upload
-                self._supabase_client.storage.from_(
-                    settings.SUPABASE_STORAGE_BUCKET
-                ).upload(current_path, file_content, file_options=file_options)
-
-                # Success - file uploaded
+            if not self.object_exists(current_path):
+                self._put_s3_object(current_path, file_content, content_type)
                 if counter > 0:
                     logger.debug(
-                        "File %s already existed, uploaded as %s",
+                        "Key %s already existed, uploaded as %s",
                         file_path,
                         current_path,
                     )
-                logger.info("File uploaded to cloud storage: %s", current_path)
+                logger.info("File uploaded to object storage: %s", current_path)
                 return current_path
 
-            except (RuntimeError, ValueError):
-                # Re-raise configuration/validation errors immediately
-                raise
-            except Exception as e:
-                # Check if error is due to duplicate file
-                # Supabase raises StorageApiError or HTTPStatusError for duplicates
-                error_msg = str(e).lower()
-                error_type = type(e).__name__.lower()
-                is_duplicate = (
-                    "duplicate" in error_msg
-                    or "409" in error_msg
-                    or "already exists" in error_msg
-                    or "resource already exists" in error_msg
-                    or "storageapi" in error_type
-                )
+            counter += 1
+            if directory:
+                current_path = f"{directory}/{base_name}_{counter}{extension}"
+            else:
+                current_path = f"{base_name}_{counter}{extension}"
 
-                if is_duplicate and counter < max_attempts - 1:
-                    # Generate new filename with counter
-                    counter += 1
-                    if directory:
-                        current_path = f"{directory}/{base_name}_{counter}{extension}"
-                    else:
-                        current_path = f"{base_name}_{counter}{extension}"
-                    logger.debug("File %s exists, trying %s", file_path, current_path)
-                else:
-                    # Not a duplicate error, or max attempts reached
-                    if counter >= max_attempts - 1:
-                        logger.error(
-                            "Could not generate unique filename for %s after %s attempts",
-                            file_path,
-                            max_attempts,
-                        )
-                        raise RuntimeError(
-                            f"Could not generate unique filename for {file_path} "
-                            f"after {max_attempts} attempts"
-                        ) from e
-                    # Re-raise if it's a different error
-                    logger.error("Upload failed for %s: %s", current_path, e)
-                    raise
-
-    def _download_from_supabase(self, file_path: str) -> bytes:
-        """Download file from cloud storage."""
-        self._validate_supabase_config()
-
-        return self._supabase_client.storage.from_(
-            settings.SUPABASE_STORAGE_BUCKET
-        ).download(file_path)
-
-    def _download_from_demo_bucket(self, file_path: str) -> bytes:
-        """Download file from demo bucket."""
-        self._validate_demo_bucket_config()
-        self._validate_file_path(file_path)
-
-        try:
-            return self._supabase_client.storage.from_(
-                settings.SUPABASE_DEMO_BUCKET
-            ).download(file_path)
-        except Exception as e:
-            logger.error("Failed to download from demo bucket %s: %s", file_path, e)
-            raise RuntimeError(f"Failed to download from demo bucket: {e}") from e
-
-    def _delete_from_supabase(self, file_path: str) -> None:
-        """Delete file from cloud storage."""
-        self._validate_supabase_config()
-
-        self._supabase_client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).remove(
-            [file_path]
+        logger.error(
+            "Could not generate unique key for %s after %s attempts",
+            file_path,
+            max_attempts,
+        )
+        raise RuntimeError(
+            f"Could not generate unique key for {file_path} "
+            f"after {max_attempts} attempts"
         )
 
-        logger.info("File deleted from cloud storage: %s", file_path)
-
-    def _get_supabase_url(self, file_path: str) -> str:
-        """Get public URL for file in cloud storage."""
-        self._validate_supabase_config()
-
-        return self._supabase_client.storage.from_(
-            settings.SUPABASE_STORAGE_BUCKET
-        ).get_public_url(file_path)
-
-    def _create_supabase_signed_url(self, file_path: str, expires_in: int) -> str:
-        """Create a signed URL for secure, time-limited access to a file in cloud storage."""
-        self._validate_supabase_config()
-
+    def _download_from_s3(self, file_path: str) -> bytes:
+        """Download an object from the bucket."""
         try:
-            response = self._supabase_client.storage.from_(
-                settings.SUPABASE_STORAGE_BUCKET
-            ).create_signed_url(file_path, expires_in)
+            response = self._get_s3_client().get_object(
+                Bucket=settings.S3_BUCKET, Key=file_path
+            )
+            return response["Body"].read()
+        except Exception as e:
+            logger.error("Failed to download %s from object storage: %s", file_path, e)
+            raise RuntimeError(f"Failed to download {file_path}: {e}") from e
 
-            # Supabase returns dict with 'signedURL' key
-            if isinstance(response, dict) and "signedURL" in response:
-                return response["signedURL"]
-            elif isinstance(response, dict) and "url" in response:
-                # Fallback for different response formats
-                return response["url"]
-            else:
-                raise RuntimeError(
-                    f"Unexpected response format from Supabase signed URL: {response}"
-                )
+    def _delete_from_s3(self, file_path: str) -> None:
+        """Delete an object from the bucket."""
+        try:
+            self._get_s3_client().delete_object(
+                Bucket=settings.S3_BUCKET, Key=file_path
+            )
+            logger.info("File deleted from object storage: %s", file_path)
+        except Exception as e:
+            logger.error("Failed to delete %s from object storage: %s", file_path, e)
+            raise RuntimeError(f"Failed to delete {file_path}: {e}") from e
+
+    def _create_s3_signed_url(self, file_path: str, expires_in: int) -> str:
+        """Create a presigned GET URL for an object."""
+        try:
+            return self._get_s3_client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": settings.S3_BUCKET, "Key": file_path},
+                ExpiresIn=expires_in,
+            )
         except Exception as e:
             logger.error("Failed to create signed URL for %s: %s", file_path, e)
             raise RuntimeError(f"Failed to create signed URL: {e}") from e
 
-    # Demo bucket methods
-
-    def get_demo_public_url(self, file_path: str) -> str:
-        """Get public URL for a file in the demo bucket.
-
-        Args:
-            file_path: Path to the file in the demo bucket (e.g., 'demo/video.mp4')
-
-        Returns:
-            Public URL string for the demo bucket file
-
-        Raises:
-            ValueError: If demo bucket configuration is invalid
-            RuntimeError: If URL generation fails
-        """
-        self._validate_demo_bucket_config()
+    def get_object_size(self, file_path: str) -> int:
+        """Return the size of a stored file in bytes."""
         self._validate_file_path(file_path)
-
+        if self.storage_type != "s3":
+            return self._resolve_local_path(file_path).stat().st_size
         try:
-            return self._supabase_client.storage.from_(
-                settings.SUPABASE_DEMO_BUCKET
-            ).get_public_url(file_path)
-        except (ValueError, RuntimeError, AttributeError) as e:
-            logger.error("Failed to get demo public URL for %s: %s", file_path, e)
-            raise RuntimeError(f"Failed to get demo public URL: {e}") from e
-
-    def demo_object_exists(self, file_path: str) -> bool:
-        """Check if an object exists in the demo bucket.
-
-        Args:
-            file_path: Path to check in the demo bucket
-
-        Returns:
-            True if object exists, False otherwise
-
-        Raises:
-            ValueError: If demo bucket configuration is invalid
-        """
-        self._validate_demo_bucket_config()
-        self._validate_file_path(file_path)
-
-        try:
-            # List files in the directory containing the file
-            directory = file_path.rsplit("/", 1)[0] if "/" in file_path else ""
-            filename = file_path.split("/")[-1]
-
-            result = self._supabase_client.storage.from_(
-                settings.SUPABASE_DEMO_BUCKET
-            ).list(directory)
-
-            # Check if our file is in the list
-            if isinstance(result, list):
-                return any(
-                    item.get("name") == filename
-                    for item in result
-                    if isinstance(item, dict)
-                )
-            return False
-        except (ValueError, RuntimeError, AttributeError) as e:
-            logger.warning(
-                f"Failed to check demo object existence for {file_path}: {e}"
+            head = self._get_s3_client().head_object(
+                Bucket=settings.S3_BUCKET, Key=file_path
             )
-            return False
+            return int(head["ContentLength"])
+        except Exception as e:
+            logger.error("Failed to stat %s in object storage: %s", file_path, e)
+            raise RuntimeError(f"Failed to stat {file_path}: {e}") from e
 
-    def upload_demo_object(
-        self, file_path: str, file_content: bytes, content_type: Optional[str] = None
-    ) -> str:
-        """Upload a file to the demo bucket.
+    def open_range_stream(
+        self, file_path: str, start: Optional[int] = None, end: Optional[int] = None
+    ) -> tuple[BinaryIO, int]:
+        """Open a byte range of a stored object for streaming.
+
+        Range support is what makes scrubbing work in the browser: the video
+        element asks for the slice it needs instead of the whole file.
 
         Args:
-            file_path: Path where file should be stored in demo bucket
-            file_content: File content as bytes
-            content_type: MIME type of the file
+            file_path: Path to the file in storage
+            start: First byte of the range, or None for the whole object
+            end: Last byte of the range (inclusive), or None for open-ended
 
         Returns:
-            Storage path of the uploaded file
-
-        Raises:
-            ValueError: If demo bucket configuration is invalid
-            RuntimeError: If upload fails
+            Tuple of (readable body, number of bytes in this response)
         """
-        self._validate_demo_bucket_config()
         self._validate_file_path(file_path)
+        if self.storage_type != "s3":
+            raise ValueError("open_range_stream is only supported for object storage")
 
-        file_options: dict[str, str] = {}
-        if content_type:
-            file_options["content-type"] = content_type
+        params: dict[str, Any] = {"Bucket": settings.S3_BUCKET, "Key": file_path}
+        if start is not None:
+            params["Range"] = f"bytes={start}-{end if end is not None else ''}"
 
-        # Extract directory and filename components for counter-based naming
-        path_obj = Path(file_path)
-        directory = str(path_obj.parent) if path_obj.parent != Path(".") else ""
-        base_name = path_obj.stem
-        extension = path_obj.suffix
+        try:
+            response = self._get_s3_client().get_object(**params)
+        except Exception as e:
+            logger.error("Failed to open %s from object storage: %s", file_path, e)
+            raise RuntimeError(f"Failed to open {file_path}: {e}") from e
 
-        current_path = file_path
-        counter = 0
-        max_attempts = 1000
-
-        while counter < max_attempts:
-            try:
-                self._supabase_client.storage.from_(
-                    settings.SUPABASE_DEMO_BUCKET
-                ).upload(current_path, file_content, file_options=file_options)
-                if counter > 0:
-                    logger.debug(
-                        "Demo file %s already existed, uploaded as %s",
-                        file_path,
-                        current_path,
-                    )
-                logger.info("File uploaded to demo bucket: %s", current_path)
-                return current_path
-            except (ValueError, RuntimeError, AttributeError) as e:
-                logger.error("Failed to upload to demo bucket %s: %s", current_path, e)
-                raise RuntimeError(f"Failed to upload to demo bucket: {e}") from e
-            except Exception as e:
-                error_msg = str(e).lower()
-                error_type = type(e).__name__.lower()
-                is_duplicate = (
-                    "duplicate" in error_msg
-                    or "409" in error_msg
-                    or "already exists" in error_msg
-                    or "resource already exists" in error_msg
-                    or "storageapi" in error_type
-                )
-
-                if is_duplicate and counter < max_attempts - 1:
-                    counter += 1
-                    if directory:
-                        current_path = f"{directory}/{base_name}_{counter}{extension}"
-                    else:
-                        current_path = f"{base_name}_{counter}{extension}"
-                    logger.debug(
-                        "Demo file %s exists, trying %s", file_path, current_path
-                    )
-                else:
-                    if counter >= max_attempts - 1:
-                        logger.error(
-                            "Could not generate unique demo filename for %s after %s attempts",
-                            file_path,
-                            max_attempts,
-                        )
-                        raise RuntimeError(
-                            f"Could not generate unique filename for {file_path} "
-                            f"after {max_attempts} attempts"
-                        ) from e
-                    logger.error("Upload failed for %s: %s", current_path, e)
-                    raise RuntimeError(f"Failed to upload to demo bucket: {e}") from e
+        return response["Body"], int(response["ContentLength"])
 
     # Local storage methods
 

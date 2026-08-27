@@ -1,24 +1,92 @@
-"""Service for video streaming and URL generation."""
+"""Service for video streaming and URL generation.
+
+Video bytes are always served from the app's own origin, never by redirecting
+the browser to the object store. Two things depend on that: the serve thumbnail
+strip draws frames into a canvas and calls ``toDataURL()``, which a cross-origin
+video would taint, and the app has to keep working when it is reached through a
+tunnel or from a device that cannot route to the storage host.
+"""
 
 import logging
-from typing import Optional
+import re
+from typing import Iterator, Optional
 
 from fastapi import Response
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.models.video import Video
 from app.services import video_service
-from app.services.storage_service import storage_service
+from app.services.storage_service import STREAM_CHUNK_SIZE, storage_service
 from app.utils.file_validation import get_safe_filename, validate_file_exists
 
 logger = logging.getLogger(__name__)
+
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _parse_range_header(
+    range_header: Optional[str], file_size: int
+) -> Optional[tuple[int, int]]:
+    """Parse a single-range HTTP Range header into inclusive byte offsets.
+
+    Args:
+        range_header: Raw header value, e.g. "bytes=0-1023"
+        file_size: Total size of the object in bytes
+
+    Returns:
+        (start, end) inclusive, or None when the header is absent or unusable
+        and the full object should be sent instead.
+    """
+    if not range_header:
+        return None
+
+    match = _RANGE_RE.match(range_header.strip())
+    if not match:
+        return None
+
+    raw_start, raw_end = match.group(1), match.group(2)
+
+    if not raw_start and not raw_end:
+        return None
+
+    if not raw_start:
+        # "bytes=-500" means the final 500 bytes.
+        length = int(raw_end)
+        if length <= 0:
+            return None
+        start = max(0, file_size - length)
+        end = file_size - 1
+    else:
+        start = int(raw_start)
+        end = int(raw_end) if raw_end else file_size - 1
+
+    # Clamp to the object; a start past the end is unsatisfiable.
+    end = min(end, file_size - 1)
+    if start > end or start >= file_size:
+        return None
+
+    return start, end
+
+
+def _iter_body(body: object, chunk_size: int = STREAM_CHUNK_SIZE) -> Iterator[bytes]:
+    """Yield an object-storage body in chunks, closing it when finished."""
+    try:
+        while True:
+            chunk = body.read(chunk_size)  # type: ignore[attr-defined]
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        close = getattr(body, "close", None)
+        if close is not None:
+            close()
 
 
 def get_video_stream_response(
     db_video: Video,
     current_user: Optional[dict] = None,
+    range_header: Optional[str] = None,
 ) -> Response:
     """Get streaming response for a video.
 
@@ -29,69 +97,62 @@ def get_video_stream_response(
     Args:
         db_video: Already-fetched Video ORM object
         current_user: Optional user dict (used for logging only)
+        range_header: Raw HTTP Range header from the client, if any
 
     Returns:
-        Response object (FileResponse, RedirectResponse, or StreamingResponse)
+        Response object (FileResponse or StreamingResponse)
 
     Raises:
         RuntimeError: If storage operations fail
     """
-    # Use storage service to get file
-    if settings.STORAGE_TYPE == "supabase":
-        # For active demo videos, use public demo bucket URL
-        if db_video.is_active_demo and settings.SUPABASE_DEMO_BUCKET:
-            try:
-                # Demo videos should be stored with 'demo/' prefix in demo bucket
-                demo_path = db_video.file_path
-                if not demo_path.startswith("demo/"):
-                    demo_path = f"demo/{db_video.id}_{db_video.filename}"
-                demo_url = storage_service.get_demo_public_url(demo_path)
-                logger.info(
-                    "Redirecting to demo bucket URL for active demo video %s: %s",
-                    db_video.id,
-                    demo_url,
-                )
-                return RedirectResponse(url=demo_url)
-            except (ValueError, RuntimeError) as e:
-                logger.error(
-                    "Failed to get demo bucket URL for video %s: %s", db_video.id, e
-                )
-                # Fallback to regular flow
+    filename = get_safe_filename(db_video.filename)
+    media_type = db_video.content_type or "video/mp4"
 
-        # For regular videos, use private bucket with signed URL or public URL
-        storage_path = db_video.file_path
-        try:
-            file_url = storage_service.get_file_url(storage_path)
-            logger.info(
-                "Redirecting to Supabase URL for video %s: %s", db_video.id, file_url
-            )
-            return RedirectResponse(url=file_url)
-        except (ValueError, RuntimeError, OSError) as e:
-            logger.error(
-                "Failed to get Supabase URL for video %s, storage_path=%s: %s",
-                db_video.id,
-                storage_path,
-                e,
-            )
-            # Fallback: download and stream
-            file_data = storage_service.download_file(storage_path)
-            return StreamingResponse(
-                iter([file_data]),
-                media_type=db_video.content_type or "video/mp4",
-                headers={
-                    "Content-Disposition": f'inline; filename="{get_safe_filename(db_video.filename)}"'
-                },
-            )
-    else:
-        # For local storage, resolve the storage path to actual file system path
+    if not storage_service.is_remote:
+        # FileResponse implements Range handling itself.
         resolved_path = storage_service.get_local_file_path(db_video.file_path)
         validate_file_exists(resolved_path, db_video.filename)
 
         return FileResponse(
             path=str(resolved_path),
-            media_type=db_video.content_type or "video/mp4",
-            filename=get_safe_filename(db_video.filename),
+            media_type=media_type,
+            filename=filename,
         )
+
+    storage_path = db_video.file_path
+    file_size = storage_service.get_object_size(storage_path)
+    byte_range = _parse_range_header(range_header, file_size)
+
+    if byte_range is None:
+        body, content_length = storage_service.open_range_stream(storage_path)
+        return StreamingResponse(
+            _iter_body(body),
+            media_type=media_type,
+            headers={
+                "Content-Length": str(content_length),
+                # Without this the browser will not offer scrubbing at all.
+                "Accept-Ranges": "bytes",
+                "Content-Disposition": f'inline; filename="{filename}"',
+            },
+        )
+
+    start, end = byte_range
+    body, content_length = storage_service.open_range_stream(storage_path, start, end)
+    logger.debug(
+        "Serving range %s-%s of %s (%s bytes)", start, end, storage_path, content_length
+    )
+
+    return StreamingResponse(
+        _iter_body(body),
+        status_code=206,
+        media_type=media_type,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(content_length),
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{filename}"',
+        },
+    )
 
 
 def get_video_url(
@@ -99,7 +160,10 @@ def get_video_url(
     video_id: int,
     current_user: Optional[dict] = None,
 ) -> str:
-    """Get a signed/public URL for a video.
+    """Get the URL a client should use to fetch a video.
+
+    Always the app's own stream endpoint — see the module docstring for why the
+    object store is not exposed to browsers directly.
 
     Args:
         db: Database session
@@ -107,28 +171,13 @@ def get_video_url(
         current_user: Optional user dict for authorization
 
     Returns:
-        URL string
+        Relative URL string for the stream endpoint
 
     Raises:
-        ValueError: If video not found or URL generation fails
-        RuntimeError: If storage operations fail
+        ValueError: If the video is not found
     """
     db_video = video_service.get_video_by_id(db, video_id)
     if not db_video:
         raise ValueError(f"Video with ID {video_id} not found")
 
-    if settings.STORAGE_TYPE == "supabase":
-        # For active demo videos, use public demo bucket URL
-        if db_video.is_active_demo and settings.SUPABASE_DEMO_BUCKET:
-            demo_path = db_video.file_path
-            if not demo_path.startswith("demo/"):
-                demo_path = f"demo/{db_video.id}_{db_video.filename}"
-            return storage_service.get_demo_public_url(demo_path)
-
-        # For regular videos, get signed URL or public URL
-        return storage_service.get_file_url(db_video.file_path)
-    else:
-        # For local storage, return a relative path or construct a URL
-        # This would typically be handled by the frontend constructing the URL
-        # based on the API base URL
-        raise ValueError("URL generation not supported for local storage")
+    return f"/v0/videos/{video_id}/stream"

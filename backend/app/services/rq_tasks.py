@@ -52,7 +52,7 @@ def _get_temp_video_path(video_path: str) -> tuple[Path, Path | None]:
         Tuple of (local_path, temp_path) where temp_path is None if not a temp file
     """
     local_path = storage_service.get_local_file_path(video_path)
-    temp_path = local_path if storage_service.storage_type == "supabase" else None
+    temp_path = local_path if storage_service.is_remote else None
     return local_path, temp_path
 
 

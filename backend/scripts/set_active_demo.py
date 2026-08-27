@@ -18,7 +18,6 @@ from pathlib import Path
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
-from app.core.config import settings  # noqa: E402
 from app.core.database import SessionLocal  # noqa: E402
 from app.models.video import Video  # noqa: E402
 from app.services.storage_service import storage_service  # noqa: E402
@@ -77,27 +76,14 @@ def set_active_demo(video_id: int) -> None:
                 f"Only videos in the demo folder can be active demos."
             )
 
-        # 4. Ensure file exists in demo bucket (if using Supabase)
-        if settings.STORAGE_TYPE == "supabase" and settings.SUPABASE_DEMO_BUCKET:
-            demo_path = video.file_path
-            if not storage_service.demo_object_exists(demo_path):
-                print(f"⚠️  Demo file not found in bucket: {demo_path}")
-                print("   Attempting to copy from private bucket...")
-
-                # Try to download from private bucket and upload to demo bucket
-                try:
-                    file_content = storage_service.download_file(video.file_path)
-                    storage_service.upload_demo_object(
-                        demo_path, file_content, video.content_type
-                    )
-                    print(f"✅ Copied video to demo bucket: {demo_path}")
-                except Exception as e:
-                    raise ValueError(
-                        f"Failed to copy video to demo bucket: {e}. "
-                        f"Please ensure the video exists in the private bucket first."
-                    ) from e
-            else:
-                print(f"✅ Demo file exists in bucket: {demo_path}")
+        # 4. Confirm the object is actually present under the demo/ prefix.
+        demo_path = video.file_path
+        if not storage_service.object_exists(demo_path):
+            raise ValueError(
+                f"Demo file not found in storage: {demo_path}. "
+                f"Upload the video before making it the active demo."
+            )
+        print(f"✅ Demo file exists in storage: {demo_path}")
 
         # 5. Unset any existing active demo
         old_active = db.query(Video).filter(Video.is_active_demo).first()

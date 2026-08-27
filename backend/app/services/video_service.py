@@ -215,22 +215,12 @@ def handle_video_upload(
     validate_video_file(filename, file_size, content_type, metadata)
 
     try:
-        if (
-            is_demo
-            and settings.STORAGE_TYPE == "supabase"
-            and settings.SUPABASE_DEMO_BUCKET
-        ):
-            storage_path = storage_service.upload_demo_object(
-                file_path=storage_file_path,
-                file_content=file_content,
-                content_type=content_type,
-            )
-        else:
-            storage_path = storage_service.upload_file(
-                file_content=file_content,
-                file_path=storage_file_path,
-                content_type=content_type,
-            )
+        # Demo and regular uploads differ only by the key prefix chosen above.
+        storage_path = storage_service.upload_file(
+            file_content=file_content,
+            file_path=storage_file_path,
+            content_type=content_type,
+        )
         actual_filename = Path(storage_path).name
         unique_filename = actual_filename
     except (ValueError, RuntimeError, OSError) as e:
@@ -397,11 +387,11 @@ def delete_video_with_analyses(db: Session, video_id: int) -> tuple[bool, str, i
     try:
         from app.services.storage_service import storage_service
 
-        # Delete original video file from storage (local or Supabase)
+        # Delete original video file from storage (local disk or bucket)
 
         try:
             # Use storage service to delete the file
-            # For Supabase, file_path is 'raw/filename.mp4'
+            # For object storage, file_path is 'raw/filename.mp4'
             # For local, file_path is the full path
             storage_path = video.file_path
             storage_service.delete_file(storage_path)

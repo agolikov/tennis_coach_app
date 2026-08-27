@@ -5,11 +5,9 @@ services:
       - chown
       - -R
       - 1000:1000
-      - /app/data
       - /app/backend/ml_models
     restart: "no"
     volumes:
-      - app_data:/app/data
       - ml_models:/app/backend/ml_models
 
   redis:
@@ -36,8 +34,14 @@ services:
       REDIS_URL: redis://redis:6379/0
       SERVICE_TYPE: worker
       LOG_LEVEL: INFO
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_REGION: ${S3_REGION:-us-east-1}
     volumes:
-      - app_data:/app/data
+      # Video data lives in object storage; only the model cache is persisted.
+      # Transcoding scratch stays container-local and is expendable.
       - ml_models:/app/backend/ml_models
     depends_on:
       data-init:
@@ -69,8 +73,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       SERVICE_TYPE: api-only
       LOG_LEVEL: INFO
-    volumes:
-      - app_data:/app/data
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_REGION: ${S3_REGION:-us-east-1}
     depends_on:
       redis:
         condition: service_healthy
@@ -102,6 +109,5 @@ services:
       start_period: 5s
 
 volumes:
-  app_data:
   ml_models:
   redis_data:

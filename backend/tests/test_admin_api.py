@@ -6,7 +6,7 @@ TDD Contract: Tests define behavior, not implementation details.
 
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException, status
@@ -199,29 +199,23 @@ class TestUploadForUserEndpoint:
 
     def test_upload_for_user_validates_target_user_id(self, client: TestClient) -> None:
         """Test upload-for-user validates target_user_id parameter."""
-        with patch("app.api.routes.admin.get_user_by_id") as mock_get_user:
-            mock_get_user.return_value = None  # User doesn't exist
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
+            tmp_file.write(
+                b"\x00\x00\x00\x20ftypmp41\x00\x00\x00\x00mp41isom" + b"\x00" * 10000
+            )
+            tmp_file_path = tmp_file.name
 
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
-                tmp_file.write(
-                    b"\x00\x00\x00\x20ftypmp41\x00\x00\x00\x00mp41isom"
-                    + b"\x00" * 10000
+        try:
+            with open(tmp_file_path, "rb") as f:
+                response = client.post(
+                    "/v0/admin/videos/upload-for-user",
+                    files={"file": ("test.mp4", f, "video/mp4")},
+                    params={"target_user_id": "invalid-user-id"},
                 )
-                tmp_file_path = tmp_file.name
 
-            try:
-                with open(tmp_file_path, "rb") as f:
-                    response = client.post(
-                        "/v0/admin/videos/upload-for-user",
-                        files={"file": ("test.mp4", f, "video/mp4")},
-                        params={"target_user_id": "invalid-user-id"},
-                    )
-
-                assert response.status_code == 400
-                mock_get_user.assert_called_once()
-                assert mock_get_user.call_args[0][0] == "invalid-user-id"
-            finally:
-                Path(tmp_file_path).unlink(missing_ok=True)
+            assert response.status_code == 400
+        finally:
+            Path(tmp_file_path).unlink(missing_ok=True)
 
     def test_upload_for_user_success(
         self, client: TestClient, db_session: Session
@@ -230,17 +224,10 @@ class TestUploadForUserEndpoint:
         target_user_id = "22222222-2222-2222-2222-222222222222"
 
         with (
-            patch("app.api.routes.admin.get_user_by_id") as mock_get_user,
             patch("app.services.storage_service.storage_service") as mock_storage,
             patch.object(settings, "AUTO_ENQUEUE_ON_UPLOAD", False),
             patch.object(settings, "TRANSCODE_ENABLED", False),
         ):
-            # Mock user exists
-            mock_get_user.return_value = {
-                "id": target_user_id,
-                "email": "target@example.com",
-            }
-
             # Mock storage
             mock_storage.upload_file.return_value = "storage/path/test.mp4"
 
@@ -418,84 +405,20 @@ class TestDemoManagementEndpoints:
             db_session.commit()
 
 
-class TestGetUserById:
-    """Tests for get_user_by_id utility function."""
+class TestUploadForUserValidation:
+    """The target user id is validated by shape now that there is no directory."""
 
-    def test_get_user_by_id_local_profile(self) -> None:
-        """Test get_user_by_id in local profile validates UUID format."""
-        from app.utils.supabase_auth import get_user_by_id
+    def test_rejects_non_uuid_target_user(self, client: TestClient) -> None:
+        """A malformed target user id is refused rather than silently accepted."""
+        response = client.post(
+            "/v0/admin/videos/upload-for-user",
+            params={"target_user_id": "not-a-uuid"},
+            files={
+                "file": (
+                    "test.mp4",
+                    b"\x00\x00\x00\x20ftypmp41\x00\x00\x00\x00mp41isom",
+                )
+            },
+        )
 
-        with patch.object(settings, "PROFILE", "local"):
-            # Valid UUID format
-            result = get_user_by_id("123e4567-e89b-12d3-a456-426614174000")
-            assert result is not None
-            assert result["id"] == "123e4567-e89b-12d3-a456-426614174000"
-            assert result["email"] is None
-
-            # Invalid UUID format
-            result = get_user_by_id("not-a-uuid")
-            assert result is None
-
-    def test_get_user_by_id_production_valid_user(self) -> None:
-        """Test get_user_by_id in production fetches from Supabase."""
-        from app.utils.supabase_auth import get_user_by_id
-
-        mock_user = Mock()
-        mock_user.id = "123e4567-e89b-12d3-a456-426614174000"
-        mock_user.email = "user@example.com"
-        mock_user.user_metadata = {}
-
-        mock_response = Mock()
-        mock_response.user = mock_user
-        mock_response.error = None
-
-        with (
-            patch.object(settings, "PROFILE", "production"),
-            patch("app.utils.supabase_auth.get_supabase_client") as mock_get_client,
-        ):
-            mock_client = Mock()
-            mock_client.auth.admin.get_user_by_id.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            result = get_user_by_id("123e4567-e89b-12d3-a456-426614174000")
-
-            assert result is not None
-            assert result["id"] == "123e4567-e89b-12d3-a456-426614174000"
-            assert result["email"] == "user@example.com"
-
-    def test_get_user_by_id_production_user_not_found(self) -> None:
-        """Test get_user_by_id returns None when user doesn't exist."""
-        from app.utils.supabase_auth import get_user_by_id
-
-        mock_response = Mock()
-        mock_response.user = None
-        mock_response.error = Mock()
-        mock_response.error.message = "User not found"
-
-        with (
-            patch.object(settings, "PROFILE", "production"),
-            patch("app.utils.supabase_auth.get_supabase_client") as mock_get_client,
-        ):
-            mock_client = Mock()
-            mock_client.auth.admin.get_user_by_id.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            result = get_user_by_id("123e4567-e89b-12d3-a456-426614174000")
-
-            assert result is None
-
-    def test_get_user_by_id_production_exception_handling(self) -> None:
-        """Test get_user_by_id handles exceptions gracefully."""
-        from app.utils.supabase_auth import get_user_by_id
-
-        with (
-            patch.object(settings, "PROFILE", "production"),
-            patch("app.utils.supabase_auth.get_supabase_client") as mock_get_client,
-        ):
-            mock_client = Mock()
-            mock_client.auth.admin.get_user_by_id.side_effect = Exception("API error")
-            mock_get_client.return_value = mock_client
-
-            result = get_user_by_id("123e4567-e89b-12d3-a456-426614174000")
-
-            assert result is None
+        assert response.status_code != 200

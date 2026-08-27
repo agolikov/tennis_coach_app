@@ -1,6 +1,7 @@
 """Admin-only API routes for demo management and user operations."""
 
 import logging
+import uuid
 from datetime import datetime
 from typing import List, Optional
 
@@ -15,7 +16,6 @@ from app.dependencies.auth import get_current_user
 from app.services import demo_service, video_service
 from app.utils.authorization import is_admin, require_admin
 from app.utils.error_handling import handle_not_found_error, log_and_raise_error
-from app.utils.supabase_auth import get_user_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +226,7 @@ async def analyze_demo_pose(
 async def upload_video_for_user(
     file: UploadFile = File(...),
     target_user_id: str = Query(
-        ..., description="Supabase auth user ID to assign video to"
+        ..., description="Auth user ID (UUID) to assign video to"
     ),
     is_demo: bool = Query(False, description="Upload as demo video"),
     session_type: Optional[str] = Query(
@@ -245,7 +245,7 @@ async def upload_video_for_user(
 
     Args:
         file: Video file to upload
-        target_user_id: Supabase auth user ID to assign video ownership to
+        target_user_id: Auth user ID (UUID) to assign video ownership to
         is_demo: If True, upload as demo video
         session_type: Session type for serve-focused workflow
         camera_angle: Camera angle for serve biomechanics
@@ -257,15 +257,20 @@ async def upload_video_for_user(
     require_admin(current_user)
 
     try:
-        # Validate target user exists in Supabase
-        target_user = get_user_by_id(target_user_id)
-        if not target_user:
-            raise ValueError(f"Target user {target_user_id} not found in Supabase")
+        # There is no user directory to look the target up in, so validate the
+        # shape only. An unknown-but-well-formed id yields videos owned by an
+        # id nobody signs in as, which is inert rather than dangerous.
+        try:
+            uuid.UUID(target_user_id)
+        except (ValueError, AttributeError, TypeError) as e:
+            raise ValueError(
+                f"Target user id {target_user_id!r} is not a valid UUID"
+            ) from e
 
         logger.info(
             "Admin %s uploading video for user %s",
             current_user.get("email"),
-            target_user.get("email"),
+            target_user_id,
         )
 
         file.file.seek(0, 2)

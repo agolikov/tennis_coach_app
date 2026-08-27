@@ -47,7 +47,6 @@ from app.services import (
     video_service,
     video_streaming_service,
 )
-from app.services.storage_service import storage_service
 from app.utils.authorization import (
     is_admin,
     require_upload_limit,
@@ -271,17 +270,18 @@ async def get_video(
 @router.get("/{video_id}/stream", response_model=None)
 async def stream_video(
     video_id: int,
+    request: Request,
     current_user: Optional[dict] = Depends(get_optional_user),
     db: Session = Depends(get_db),
 ) -> Response:
     """
-    Stream a video file.
+    Stream a video file, honouring HTTP Range requests so the player can seek.
 
     Args:
         video_id: Unique video identifier
 
     Returns:
-        Video file stream or redirect to storage URL
+        Video file stream (200, or 206 for a ranged request)
     """
     try:
         db_video = video_service.get_video_by_id(db, video_id)
@@ -296,6 +296,7 @@ async def stream_video(
         return video_streaming_service.get_video_stream_response(
             db_video=db_video,
             current_user=current_user,
+            range_header=request.headers.get("range"),
         )
     except ValueError as e:
         error_msg = str(e).lower()
@@ -350,65 +351,13 @@ async def get_video_url(
         if expires_in < 60 or expires_in > 86400:
             raise ValueError("expires_in must be between 60 and 86400 seconds")
 
-        # Use storage service to get signed URL or file path
-        if settings.STORAGE_TYPE == "supabase":
-            # For active demo videos, use public demo bucket URL (no expiration)
-            if db_video.is_active_demo and settings.SUPABASE_DEMO_BUCKET:
-                try:
-                    # Demo videos should be stored with 'demo/' prefix in demo bucket
-                    demo_path = db_video.file_path
-                    if not demo_path.startswith("demo/"):
-                        demo_path = f"demo/{db_video.id}_{db_video.filename}"
-                    demo_url = storage_service.get_demo_public_url(demo_path)
-                    logger.info(
-                        "Generated demo bucket public URL for active demo video %s",
-                        video_id,
-                    )
-                    # Return with max expiration since it's a public URL
-                    return VideoSignedUrlResponse(url=demo_url, expires_in=86400 * 365)
-                except (ValueError, RuntimeError) as e:
-                    logger.error(
-                        "Failed to get demo bucket URL for video %s: %s",
-                        video_id,
-                        e,
-                    )
-                    # Fallback to regular flow
-
-            # For regular videos, use private bucket with signed URL
-            storage_path = db_video.file_path
-            try:
-                signed_url = storage_service.create_signed_url(
-                    storage_path, expires_in=expires_in
-                )
-                logger.info(
-                    "Generated signed URL for video %s, expires in %ss",
-                    video_id,
-                    expires_in,
-                )
-                return VideoSignedUrlResponse(url=signed_url, expires_in=expires_in)
-            except (ValueError, RuntimeError) as e:
-                logger.error(
-                    "Failed to create signed URL for video %s, storage_path=%s: %s",
-                    video_id,
-                    storage_path,
-                    e,
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to generate video URL",
-                ) from e
-        else:
-            # For local storage, construct full URL to the stream endpoint
-            # Use the request's base URL to ensure it works with any deployment
-            # Note: Router is mounted at /v0/videos, so include /v0 prefix
-            base_url = str(request.base_url).rstrip("/")
-            stream_url = f"{base_url}/v0/videos/{video_id}/stream"
-            logger.debug(
-                "Returning stream URL for local video %s: %s",
-                video_id,
-                stream_url,
-            )
-            return VideoSignedUrlResponse(url=stream_url, expires_in=expires_in)
+        # Both backends are served through this app's own stream endpoint, so
+        # the video stays same-origin regardless of where the bytes live.
+        # Note: Router is mounted at /v0/videos, so include /v0 prefix.
+        base_url = str(request.base_url).rstrip("/")
+        stream_url = f"{base_url}/v0/videos/{video_id}/stream"
+        logger.debug("Returning stream URL for video %s: %s", video_id, stream_url)
+        return VideoSignedUrlResponse(url=stream_url, expires_in=expires_in)
 
     except (OSError, ValueError) as e:
         log_and_raise_error(e, "get_video_url", {"video_id": video_id})

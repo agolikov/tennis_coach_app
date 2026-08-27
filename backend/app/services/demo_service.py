@@ -6,14 +6,12 @@ from typing import List
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.models.pose_detection import PoseDetection
 from app.models.serve_window import ServeWindow
 from app.models.video import Video
 from app.models.video_job import VideoJob
 from app.services import video_service
 from app.services.rq_tasks import enqueue_pose_analysis
-from app.services.storage_service import storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -138,23 +136,12 @@ def set_active_demo_video(db: Session, video_id: int) -> Video:
         raise ValueError(f"Video with ID {video_id} not found")
 
     validate_demo_eligibility(video)
-    video_path = video.file_path
-    content_type = video.content_type
 
     # End any open transaction before external storage I/O.
     db.rollback()
 
-    # Copy to demo bucket if using Supabase and demo bucket is configured
-    if settings.STORAGE_TYPE == "supabase" and settings.SUPABASE_DEMO_BUCKET:
-        demo_path = video_path
-        if not storage_service.demo_object_exists(demo_path):
-            try:
-                file_content = storage_service.download_private_file(video_path)
-                storage_service.upload_demo_object(
-                    demo_path, file_content, content_type
-                )
-            except Exception as e:
-                raise RuntimeError(f"Failed to copy video to demo bucket: {e}") from e
+    # Demo videos live under the "demo/" prefix of the same bucket, so being
+    # promoted to the active demo needs no copy between buckets.
 
     # Re-load and re-validate before mutating DB state.
     video = db.query(Video).filter(Video.id == video_id).first()
@@ -278,24 +265,8 @@ def delete_demo_video(db: Session, video_id: int) -> tuple[str, int]:
             "Cannot delete the active demo. Set another video as active first."
         )
 
-    file_path = video.file_path
-
-    # Best-effort: clean up the demo bucket copy if it exists there.
-    # set_active_demo_video copies to the demo bucket, so a formerly-active video
-    # may have a stale copy there even after being superseded.
-    if settings.STORAGE_TYPE == "supabase" and settings.SUPABASE_DEMO_BUCKET:
-        try:
-            if storage_service.demo_object_exists(file_path):
-                storage_service._supabase_client.storage.from_(
-                    settings.SUPABASE_DEMO_BUCKET
-                ).remove([file_path])
-                logger.info("Deleted demo bucket copy: %s", file_path)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Failed to delete demo bucket copy for video %s (%s) — continuing",
-                video_id,
-                file_path,
-            )
+    # There is no second copy to clean up: demo videos are a prefix in the
+    # primary bucket, and delete_video_with_analyses removes the object itself.
 
     success, filename, video_id = video_service.delete_video_with_analyses(db, video_id)
     if not success:

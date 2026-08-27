@@ -172,7 +172,7 @@ def extract_frame_at_timestamp(
     temp_path = None
     try:
         local_path = storage_service.get_local_file_path(video.file_path)
-        if storage_service.storage_type == "supabase":
+        if storage_service.is_remote:
             temp_path = local_path
 
         cap = cv2.VideoCapture(str(local_path))
@@ -267,8 +267,8 @@ def extract_ktp_frame(db: Session, serve_window_id: int, ktp_name: str) -> bytes
     temp_path = None
     try:
         local_path = storage_service.get_local_file_path(video.file_path)
-        # Track whether this is a temp file (cloud storage)
-        if storage_service.storage_type == "supabase":
+        # Track whether this is a temp file (object storage)
+        if storage_service.is_remote:
             temp_path = local_path
 
         cap = cv2.VideoCapture(str(local_path))
