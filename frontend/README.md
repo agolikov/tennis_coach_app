@@ -25,8 +25,6 @@ Create a `.env` file in `frontend/`:
 
 ```bash
 VITE_API_URL=http://localhost:8000
-VITE_SUPABASE_URL=https://your-project.supabase.co/
-VITE_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
 VITE_MAX_FILE_SIZE=104857600    # 100 MB
 VITE_DEBUG=true
 ```
@@ -79,7 +77,6 @@ frontend/
 - **React Router v6** — URL-based routing with lazy-loaded pages
 - **React Query** (`@tanstack/react-query`) — data fetching and cache
 - **Recharts** — feature curves and metrics charts
-- **Supabase** — auth (production only; local dev bypasses auth)
 - **Vitest** + **React Testing Library** — tests
 - **Lucide React** — icons
 - **CSS Modules / design tokens** — styling (no Tailwind runtime; `clsx` + `tailwind-merge` for class composition)
@@ -99,7 +96,7 @@ Demo video metadata is prefetched on the home page for fast demo load.
 
 ## Key patterns
 
-- **Auth:** Supabase in production, mock user in local. `ProtectedRoute` wraps auth-gated pages. `useAuth` hook for session state.
+- **Auth:** no external identity provider; the app runs as a single local user. `ProtectedRoute` wraps auth-gated pages. `useAuth` hook for session state.
 - **Analysis dashboard:** Shared between authenticated users and the public demo page. New API calls in this tree must handle unauthenticated demo access (see `CLAUDE.md` demo compatibility rules).
 - **Data fetching:** React Query for all API calls. API client modules live in `services/`.
 - **Styling:** Design tokens in `design-tokens.css`. Read `VISUAL_IDENTITY.md` before UI work.
@@ -113,7 +110,7 @@ npm run test:ci                    # CI (single run + coverage)
 npm test -- VideoList.test.tsx     # Specific file
 ```
 
-Tests use Vitest + React Testing Library. Mock external dependencies (API, Supabase). See `CLAUDE.md` testing section for when to write tests first vs. after.
+Tests use Vitest + React Testing Library. Mock external dependencies (the API). See `CLAUDE.md` testing section for when to write tests first vs. after.
 
 ## Deployment
 
