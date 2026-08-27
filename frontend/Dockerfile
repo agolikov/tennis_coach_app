@@ -32,8 +32,9 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the app
-RUN npm run build
+# Coolify serves this image at the domain root. The repository's normal build
+# keeps the /tennis_coach_app/ base used by GitHub Pages.
+RUN npm run build -- --base=/
 
 # Production stage
 FROM nginx:alpine AS production
