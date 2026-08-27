@@ -10,8 +10,7 @@ import {
 } from '../types/video';
 import { getAuthHeaders } from '../utils/authInterceptor';
 
-export const API_BASE_URL =
-  import.meta.env.VITE_API_URL || '/v0';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || '/v0';
 const DEFAULT_TIMEOUT_MS = 30000;
 
 type ApiRequestConfig = {
@@ -79,8 +78,12 @@ function normalizeFastApiDetail(data: unknown): ApiErrorResponseData {
   };
 }
 
-function buildUrl(path: string, params?: ApiRequestConfig['params']): string {
-  const url = new URL(`${API_BASE_URL}${path}`);
+export function buildUrl(
+  path: string,
+  params?: ApiRequestConfig['params'],
+  baseUrl: string = API_BASE_URL
+): string {
+  const url = new URL(`${baseUrl}${path}`, window.location.origin);
 
   if (!params) {
     return url.toString();
