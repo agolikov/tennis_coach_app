@@ -1,17 +1,15 @@
 # Configuration (PROFILE-based)
 
-The backend uses a **profile-based** config model: set one `PROFILE` and the app selects which services/vars matter.
+Two things are configured independently:
 
-## Profiles
+- **Database**: `DATABASE_URL` if set, otherwise auto-detected — the `postgres`
+  host inside Docker, `localhost` outside.
+- **Storage**: an S3-compatible bucket when all four `S3_*` variables are set,
+  otherwise the local filesystem. Setting only some of them is a startup error.
 
-- `PROFILE=local`
-  - **Auth**: disabled (mock user)
-  - **DB**: `DATABASE_URL` if set, otherwise auto-detected: `postgres` host inside Docker, `localhost` outside
-  - **Storage**: local filesystem
-- `PROFILE=production`
-  - **Auth**: required
-  - **DB**: requires `SUPABASE_DB_URL`
-  - **Storage**: Supabase (requires bucket + keys)
+`PROFILE` now only selects processing limits (`local` allows larger, longer
+uploads than `production`). There is no external identity provider: every
+request resolves to a single local user.
 
 ## Minimal env vars
 
@@ -21,15 +19,17 @@ The backend uses a **profile-based** config model: set one `PROFILE` and the app
 PROFILE=local
 ```
 
-### Production (or “prod services locally”)
+### With object storage
 
 ```bash
-PROFILE=production
-SUPABASE_DB_URL=postgresql://...
+DATABASE_URL=postgresql://...
 
-SUPABASE_URL=https://...
-SUPABASE_SECRET_KEY=...
-SUPABASE_STORAGE_BUCKET=...
+S3_ENDPOINT_URL=http://your-storage-host:8333
+S3_BUCKET=tennis-coach
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_REGION=us-east-1          # optional
+S3_ADDRESSING_STYLE=path     # SeaweedFS/MinIO need path-style
 
 REDIS_URL=rediss://...  # optional — defaults to redis://localhost:6379/0; use Upstash in real prod
 SERVICE_TYPE=api-only   # API container when a dedicated worker is deployed

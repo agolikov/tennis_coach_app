@@ -63,7 +63,7 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 python -m rq worker --with-scheduler
 ```
 
-When `PROFILE=local`, the API uses a fixed mock user and local disk for file storage. No Supabase credentials needed.
+The API runs as a fixed local user. With no `S3_*` variables set it stores files on local disk, so no object-storage credentials are needed.
 
 ## Environment variables
 
@@ -73,28 +73,36 @@ The Docker Compose setup provides all of these automatically. If running bare:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `PROFILE` | `local` | `local` disables auth and uses local disk storage |
+| `PROFILE` | `local` | Selects processing limits |
 | `DATABASE_URL` | Docker default | PostgreSQL connection string |
 | `REDIS_URL` | `redis://localhost:6379/0` | RQ broker |
 | `UPLOAD_DIR` | `./data/videos/raw` | Where uploaded videos are stored |
-| `PROCESSED_DIR` | `./data/videos/processed` | Where transcoded videos land |
+| `PROCESSED_DIR` | `./data/videos/processed` | Transcoding scratch space |
 
-### Production
+### Object storage
 
-Production adds Supabase for auth and cloud storage. See [`docs/config.md`](docs/config.md) for the full reference. The key additions are:
+Set all four of these to keep video data in an S3-compatible bucket (SeaweedFS,
+MinIO, AWS S3) instead of on local disk. Setting only some of them is a startup
+error, because silently falling back to disk loses uploads on the next deploy.
 
 ```bash
-PROFILE=production
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SECRET_KEY=your-secret-key
-SUPABASE_STORAGE_BUCKET=your-private-bucket
-SUPABASE_DEMO_BUCKET=your-public-demo-bucket  # optional
+S3_ENDPOINT_URL=http://your-storage-host:8333
+S3_BUCKET=your-bucket
+S3_ACCESS_KEY_ID=your-access-key
+S3_SECRET_ACCESS_KEY=your-secret-key
+S3_REGION=us-east-1            # optional, defaults to us-east-1
+S3_ADDRESSING_STYLE=path       # optional; SeaweedFS and MinIO need "path"
 ```
+
+Videos are keyed `raw/<filename>`, and demo videos `demo/<filename>`, in the
+same bucket. The API and the worker must point at the same bucket.
 
 ## Authentication
 
-- **Local (`PROFILE=local`)**: no token needed. A mock user is injected automatically. You can hit any endpoint without credentials.
-- **Production (`PROFILE=production`)**: Supabase JWT required on all protected endpoints. Missing or invalid token returns 401. Access to another user's resources returns 403.
+No external identity provider is configured. Every request resolves to a single
+local user, and no token is needed on any endpoint. Do not expose this
+deployment to an untrusted network without putting authentication in front of
+it.
 
 All data (videos, players, serve windows) is scoped by `user_id`.
 

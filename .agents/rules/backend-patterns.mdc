@@ -52,7 +52,7 @@ alwaysApply: false
 ## Storage
 
 - **Always use** `app.services.storage_service.storage_service` (don’t `open()` arbitrary paths in route/service code).
-- **Processing needs local access**: if something needs a filesystem path, obtain it via the storage abstraction (local vs Supabase).
+- **Processing needs local access**: if something needs a filesystem path, obtain it via the storage abstraction (local disk vs object storage), and delete the temp file afterwards when `storage_service.is_remote`.
 
 ## Long-Running Work (RQ + VideoJob)
 

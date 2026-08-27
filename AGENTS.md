@@ -4,7 +4,7 @@
 
 Tennis Coach App — a serve-analysis MVP. Users upload serve videos, the app runs pose estimation (MediaPipe), tags serve windows, segments the serve into biomechanics phases, and returns raw metrics for review.
 
-**Stack:** FastAPI backend, React/TypeScript frontend, PostgreSQL (Docker local / Supabase prod), Redis Queue (RQ) for background jobs, Docker Compose for local dev.
+**Stack:** FastAPI backend, React/TypeScript frontend, PostgreSQL, S3-compatible object storage for video data, Redis Queue (RQ) for background jobs, Docker Compose for local dev.
 
 ## Quick reference
 
