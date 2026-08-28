@@ -12,6 +12,9 @@ import { getAuthHeaders } from '../utils/authInterceptor';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || '/v0';
 const DEFAULT_TIMEOUT_MS = 30000;
+// A video upload is bounded by the file size and the link, not by how quickly
+// the API answers: 30 s aborts any upload the advertised 400 MB limit invites.
+const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
 type ApiRequestConfig = {
   params?: Record<string, string | number | boolean | undefined | null>;
@@ -209,7 +212,8 @@ export const videoApi = {
     const queryString = params.toString();
     const response = await api.post<VideoUploadResponse>(
       `/videos/upload${queryString ? `?${queryString}` : ''}`,
-      formData
+      formData,
+      { timeoutMs: UPLOAD_TIMEOUT_MS }
     );
     return response.data;
   },
